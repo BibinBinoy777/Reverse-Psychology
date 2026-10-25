@@ -1,0 +1,6 @@
+{
+  "name": "Reverse Psychology",
+  "description": "One MCP and interactive workbench for evidence-backed reverse engineering across native binaries, JavaScript/Electron bundles, WebAssembly, EVM bytecode, and recorded network captures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

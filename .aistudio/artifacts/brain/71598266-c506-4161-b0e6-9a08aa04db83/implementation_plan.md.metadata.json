@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for adding an interactive Visual Binary & Decompiler Diffing Engine to the Reverse Psychology Workbench, featuring side-by-side and unified diff layouts, instruction-level opcode/operand alignment, decompiled pseudocode diffing, control-flow block/branch delta summaries, and built-in patched revision presets plus custom comparison file upload.",
+  "updatedAt":  "2026-10-25T18:11:31.274147955Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
