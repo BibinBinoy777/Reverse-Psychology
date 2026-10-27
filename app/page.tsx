@@ -7,7 +7,6 @@ import {
   Copy,
   Check,
   Download,
-  Play,
   Sparkles,
   RefreshCw,
   FileText,
@@ -26,109 +25,20 @@ import {
   EvidenceCategory,
   EvidenceRecord,
   SymbolKind,
-  withoutUserinfoWhatwg,
-  buildRlEnvironmentFromHar,
 } from '@/lib/analyzers';
-import {
-  SAMPLE_ARTIFACT_PRESETS,
-  TARGET_CAPABILITY_CATALOG,
-  TargetCapabilityRow,
-} from '@/lib/sample-targets';
+import { SAMPLE_ARTIFACT_PRESETS } from '@/lib/sample-targets';
 import { generateEvidencePdfReport } from '@/lib/pdf-report';
 import { buildBinaryDiffReport, BinaryDiffReport } from '@/lib/diff-engine';
 
 type WorkbenchTab =
   | 'disassembly'
   | 'decompiler'
-  | 'diff'
-  | 'hexdump'
   | 'sections'
+  | 'hexdump'
   | 'strings';
 
 type DiffSubView = 'instructions' | 'pseudocode' | 'control-flow';
 type DiffLayoutMode = 'split' | 'unified';
-
-const BRIDGE_ADAPTER_SNIPPETS = [
-  {
-    id: 'jadx-bridge',
-    title: 'Android JADX Headless Bridge',
-    file: 'bridge/android/RpJadxBridge.java',
-    language: 'Java',
-    summary:
-      'Snapshots raw DEX ClassNode/MethodNode identities before code generation rewrites aliases, falls back to exact method Smali on <clinit> or decompiler failure, and bounds xref invoke sites to 8 MiB.',
-    code: `/** Reverse Psychology metadata boundary for headless JADX 1.5.6 */
-private JadxSession.SmartCode methodBody(JadxSession current, ClassSnapshot cls,
-    MethodSnapshot selected, JavaMethod method) {
-  if (!selected.bodyAbsenceMarkers().isEmpty())
-    return new JadxSession.SmartCode("", "java", false, selected.bodyAbsenceMarkers());
-  // Java codegen folds <clinit> into field declarations; use Smali for exact coverage
-  if (selected.shortId().equals("<clinit>()V"))
-    return exactMethodSmali(current, cls, selected, List.of("static_initializer_disassembly"));
-  String java = current.getMethodSource(method);
-  List<String> markers = DecompileFailureKt.detectDecompileFailure(java);
-  if (markers.stream().anyMatch(DecompileFailureKt.getSTRONG_FAILURE_MARKERS()::contains))
-    return exactMethodSmali(current, cls, selected, markers);
-  return new JadxSession.SmartCode(
-      TextUtilKt.truncateToBytes(java, current.getMaxSourceBytes()), "java", false, markers);
-}`,
-  },
-  {
-    id: 'ghidra-noreturn',
-    title: 'Ghidra False No-Return Repair',
-    file: 'bridge/ghidra/RpGhidraNoReturnFix.java',
-    language: 'Java',
-    summary:
-      'Clears false no-return flags on functions containing decoded RETURN P-code ops and known returning libc/TLS imports, then re-disassembles truncated call sites in place.',
-    code: `/** Clear false no-return flags and refit truncated caller bodies in place */
-private boolean clearDecodedReturn(Function function, Listing listing) throws Exception {
-  if (!function.hasNoReturn() || function.isThunk()) return false;
-  for (Instruction instruction : listing.getInstructions(function.getBody(), true)) {
-    monitor.checkCancelled();
-    FlowType flow = instruction.getFlowType();
-    if (flow.isJump() || flow.isCall()) continue;
-    for (PcodeOp operation : instruction.getPcode()) {
-      if (operation.getOpcode() != PcodeOp.RETURN) continue;
-      function.setNoReturn(false);
-      return true;
-    }
-  }
-  return false;
-}`,
-  },
-  {
-    id: 'ghidra-mips-softfloat',
-    title: 'MIPS32 o32 Soft-Float Prototype Extension',
-    file: 'bridge/ghidra/RpGhidraMipsSoftFloat.java',
-    language: 'Java',
-    summary:
-      'Derives a compiler spec extension (__rp_soft_float) removing $f12/$f14/$f0 float storage entries so soft-float o32 binaries use integer registers $a0..$a3/$v0.',
-    code: `/** Strip floating-point register entries from default o32 prototype XML */
-List<Node> removed = new ArrayList<>();
-collect(root.getElementsByTagName("pentry"), "metatype", "float", null, removed);
-collect(root.getElementsByTagName("consume"), "storage", "float", "rule", removed);
-for (Node node : removed) node.getParentNode().removeChild(node);
-new SpecExtension(currentProgram)
-    .addReplaceCompilerSpecExtension(softFloatPrototypeXml, monitor);`,
-  },
-  {
-    id: 'mitmproxy-whatwg',
-    title: 'Offline mitmproxy WHATWG Credential Redactor',
-    file: 'bridge/mitmproxy/capture.py',
-    language: 'Python',
-    summary:
-      'Parses native tnetstring flow captures under a 768 MiB RLIMIT_AS ceiling, redacting Authorization/Cookie headers and WHATWG URL authority userinfo while preserving path evidence.',
-    code: `def without_userinfo(value, base_scheme=None):
-    """Remove an authority's userinfo using the WHATWG authority boundary.
-    Special schemes also end the authority at a backslash so path '@' is preserved.
-    """
-    parsed_text = text.translate(URL_CONTROL_TRANSLATION).rstrip(C0_CONTROL_OR_SPACE)
-    located = authority_start(parsed_text, base_scheme)
-    if located is None:
-        return value
-    start, special = located
-    terminators = "/?#\\\\" if special else "/?#"`,
-  },
-];
 
 export default function ReversePsychologyApp() {
   const [selectedPresetId, setSelectedPresetId] = useState<string>('dx-ball-elf');
@@ -158,6 +68,7 @@ export default function ReversePsychologyApp() {
   const leftSplitRef = useRef<HTMLDivElement | null>(null);
   const rightSplitRef = useRef<HTMLDivElement | null>(null);
   const isSyncingScrollRef = useRef<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const comparisonFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // AI Investigation state
@@ -186,31 +97,8 @@ export default function ReversePsychologyApp() {
   });
   const [pdfExportDownloadedFile, setPdfExportDownloadedFile] = useState<string | null>(null);
 
-  // Interactive verification sandboxes
-  const [ballX, setBallX] = useState<number>(420);
-  const [paddleX, setPaddleX] = useState<number>(260);
-  const [testUrlInput, setTestUrlInput] = useState<string>(
-    'https://admin:super_secret_pw@example.test\\path@tail'
-  );
-  const [customHarText, setCustomHarText] = useState<string>('');
-  const [envNameInput, setEnvNameInput] = useState<string>('my-env');
-
-  // MCP Console state
-  const [selectedMcpTool, setSelectedMcpTool] = useState<string>('rp_inspect_binary');
-  const [mcpArgsText, setMcpArgsText] = useState<string>(
-    JSON.stringify({ presetId: 'dx-ball-elf' }, null, 2)
-  );
-  const [mcpResponseText, setMcpResponseText] = useState<string>('');
-  const [isCallingMcp, setIsCallingMcp] = useState<boolean>(false);
-  const [selectedBridgeId, setSelectedBridgeId] = useState<string>('jadx-bridge');
-
-  // Target capability filter
-  const [targetDomainFilter, setTargetDomainFilter] = useState<string>('All');
-  const [targetSearchQuery, setTargetSearchQuery] = useState<string>('');
-
   // Copy feedback
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Load initial preset analysis + paired patched v2 comparison
   useEffect(() => {
@@ -224,9 +112,6 @@ export default function ReversePsychologyApp() {
     setIsAnalyzing(true);
     const bytes = preset.buildBytes();
     const patchedBytes = preset.buildPatchedBytes();
-    if (preset.id === 'har-rl-env') {
-      setCustomHarText(new TextDecoder().decode(bytes));
-    }
     Promise.all([
       analyzeArtifact(preset.fileName, bytes),
       analyzeArtifact(preset.patchedFileName, patchedBytes),
@@ -281,7 +166,6 @@ export default function ReversePsychologyApp() {
     const result = await analyzeArtifact(file.name, bytes);
     setComparisonSource('custom-upload');
     setComparisonReport(result);
-    setActiveWorkbenchTab('diff');
   };
 
   // Synchronized scroll handler for Side-by-Side Split Diff panes
@@ -369,12 +253,12 @@ export default function ReversePsychologyApp() {
       const bytes = new Uint8Array(arrayBuffer);
       const result = await analyzeArtifact(file.name, bytes);
       setReport(result);
+      const firstFn = result.symbols.find((s) => s.kind === 'function') ?? result.symbols[0];
+      setSelectedSymbolAddress(firstFn?.address ?? result.entryPoint);
+      setSelectedSymbolLabel(firstFn?.name ?? 'Entry Point');
       setAnalystQuestion(
         `Inspect ${file.name} (${result.format}), explain its primary entry logic, and provide a clean code reconstruction with evidence provenance.`
       );
-      if (result.format === 'HAR_CAPTURE') {
-        setCustomHarText(new TextDecoder().decode(bytes));
-      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -530,44 +414,6 @@ export default function ReversePsychologyApp() {
     }
   };
 
-  // Execute live MCP tool call against /api/mcp
-  const handleExecuteMcpTool = async () => {
-    setIsCallingMcp(true);
-    try {
-      let parsedArgs = {};
-      try {
-        parsedArgs = JSON.parse(mcpArgsText);
-      } catch {
-        parsedArgs = {};
-      }
-      const res = await fetch('/api/mcp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: Date.now(),
-          method: 'tools/call',
-          params: {
-            name: selectedMcpTool,
-            arguments: parsedArgs,
-          },
-        }),
-      });
-      const json = await res.json();
-      setMcpResponseText(JSON.stringify(json, null, 2));
-    } catch (err: unknown) {
-      setMcpResponseText(
-        JSON.stringify(
-          { error: err instanceof Error ? err.message : 'MCP request failed' },
-          null,
-          2
-        )
-      );
-    } finally {
-      setIsCallingMcp(false);
-    }
-  };
-
   const handleCopy = (id: string, text: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
@@ -713,45 +559,6 @@ export default function ReversePsychologyApp() {
     aiSummary,
   ]);
 
-  // Live DX-Ball sound-pan verification calculation
-  const panCalcResult = useMemo(() => {
-    const delta = ballX - paddleX;
-    const rawScaled = (delta * 25) >> 4;
-    const clamped = Math.max(-1000, Math.min(1000, rawScaled));
-    return { delta, rawScaled, clamped };
-  }, [ballX, paddleX]);
-
-  // Live WHATWG URL redaction check
-  const whatwgTestResult = useMemo(() => {
-    return withoutUserinfoWhatwg(testUrlInput);
-  }, [testUrlInput]);
-
-  // Live HAR -> RL Environment build
-  const activeRlEnv = useMemo(() => {
-    const defaultHarPreset = SAMPLE_ARTIFACT_PRESETS.find((p) => p.id === 'har-rl-env')!;
-    const sourceHar =
-      customHarText.trim() || new TextDecoder().decode(defaultHarPreset.buildBytes());
-    return buildRlEnvironmentFromHar(sourceHar, envNameInput || 'my-env');
-  }, [customHarText, envNameInput]);
-
-  // Filtered target matrix
-  const filteredCapabilities = useMemo(() => {
-    return TARGET_CAPABILITY_CATALOG.filter((row: TargetCapabilityRow) => {
-      const matchesDomain =
-        targetDomainFilter === 'All' || row.domain === targetDomainFilter;
-      const matchesQuery =
-        !targetSearchQuery.trim() ||
-        row.target.toLowerCase().includes(targetSearchQuery.toLowerCase()) ||
-        row.returns.toLowerCase().includes(targetSearchQuery.toLowerCase()) ||
-        row.cliCommand.toLowerCase().includes(targetSearchQuery.toLowerCase());
-      return matchesDomain && matchesQuery;
-    });
-  }, [targetDomainFilter, targetSearchQuery]);
-
-  const activeBridge =
-    BRIDGE_ADAPTER_SNIPPETS.find((b) => b.id === selectedBridgeId) ??
-    BRIDGE_ADAPTER_SNIPPETS[0]!;
-
   const activePresetMeta =
     SAMPLE_ARTIFACT_PRESETS.find((p) => p.id === selectedPresetId) ??
     SAMPLE_ARTIFACT_PRESETS[0]!;
@@ -776,16 +583,16 @@ export default function ReversePsychologyApp() {
       />
 
       {/* Strict 3-Zone Top Bar Contract */}
-      <header className="sticky top-0 z-30 flex items-center justify-between gap-8 px-6 py-4 bg-[#0B0F17]/95 backdrop-blur border-b border-slate-800/80">
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-8 px-6 py-3.5 bg-[#0B0F17]/95 backdrop-blur border-b border-slate-800/80">
         {/* Zone 1: Single text element wordmark */}
         <a
-          href="#top"
+          href="#workbench"
           className="text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0 font-display"
         >
           Reverse Psychology
         </a>
 
-        {/* Zone 2: 5 concise single-line text navigation links */}
+        {/* Zone 2: Concise single-line navigation links */}
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
           <a
             href="#workbench"
@@ -805,18 +612,6 @@ export default function ReversePsychologyApp() {
           >
             Evidence Ledger
           </a>
-          <a
-            href="#rl-environments"
-            className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
-          >
-            RL Env Builder
-          </a>
-          <a
-            href="#mcp-bridges"
-            className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
-          >
-            MCP & Bridges
-          </a>
         </nav>
 
         {/* Zone 3: 1 primary action */}
@@ -832,147 +627,20 @@ export default function ReversePsychologyApp() {
         </div>
       </header>
 
-      <main id="top" className="flex-1 max-w-[1380px] w-full mx-auto px-6 py-10 space-y-16">
-        {/* Hero & Quick Setup Banner */}
-        <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch border-b border-slate-800/80 pb-12">
-          <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 text-xs text-slate-400 font-mono">
-                <span>v6.8.0</span>
-                <span aria-hidden="true">·</span>
-                <span>Local CLI & Streamable MCP Server</span>
-                <span aria-hidden="true">·</span>
-                <span>Node.js 22.23.4+ / 24.22.1+</span>
+      <main className="flex-1 max-w-[1400px] w-full mx-auto px-6 py-8 space-y-12">
+        {/* Section 01: Core Reverse Engineering Workbench */}
+        <section id="workbench" className="space-y-5 scroll-mt-16">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <div className="text-xs text-slate-400">
+                01. Binary, Bytecode, Bundle &amp; Capture Inspector
               </div>
-
-              <h1
-                className="text-3xl sm:text-5xl font-bold tracking-tight text-white leading-[1.12] font-display"
-                style={{ textWrap: 'balance' }}
-              >
-                Don&apos;t just decompile the binary. Interrogate the intent.
+              <h1 className="text-2xl font-bold text-white font-display">
+                Analysis Workbench
               </h1>
-
-              <p className="text-base text-slate-300 leading-relaxed max-w-[68ch]">
-                See a feature in an application that you want in your own product?{' '}
-                <strong className="text-white font-medium">Reverse Psychology</strong> connects
-                your coding agent and terminal to deterministic inspection tools across native
-                binaries, JavaScript and Electron bundles, WebAssembly, EVM bytecode, and
-                recorded network captures—returning every conclusion with its exact{' '}
-                <span className="text-indigo-300">Observed</span>,{' '}
-                <span className="text-emerald-300">Derived</span>,{' '}
-                <span className="text-amber-300">Inferred</span>, and{' '}
-                <span className="text-rose-300">Unknown</span> provenance.
-              </p>
             </div>
 
-            {/* Setup CLI Command Bar */}
-            <div className="space-y-3 pt-2">
-              <div className="text-xs text-slate-400">
-                Register Reverse Psychology&apos;s MCP server and investigation skill with Claude
-                Code, Cursor, Codex, Gemini CLI, or Grok Build:
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="flex items-center justify-between gap-4 bg-[#111827] border border-slate-800 rounded-lg px-4 py-2.5 font-mono text-xs text-slate-200">
-                  <code>npx reverse-psychology-agents setup</code>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleCopy('npx-setup', 'npx reverse-psychology-agents setup')
-                    }
-                    className="text-slate-400 hover:text-white transition-colors cursor-pointer"
-                    title="Copy setup command"
-                  >
-                    {copiedId === 'npx-setup' ? (
-                      <Check className="w-4 h-4 text-emerald-400" />
-                    ) : (
-                      <Copy className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="px-4 py-2.5 text-xs font-semibold text-slate-200 bg-slate-800/90 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Inspect Local Binary / JS / HAR
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Right Column: Epistemic Provenance Architecture Summary */}
-          <div className="lg:col-span-5 bg-[#111827] border border-slate-800 rounded-xl p-6 flex flex-col justify-between space-y-5">
-            <div className="space-y-1.5">
-              <div className="text-xs text-indigo-400 font-mono">
-                Epistemic Provenance Contract
-              </div>
-              <h2 className="text-lg font-semibold text-white font-display">
-                Four-Tier Evidence Ledger Architecture
-              </h2>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Consumers never reinterpret raw bytes downstream. Every boundary parses once and
-                records explicit provenance coordinates:
-              </p>
-            </div>
-
-            <div className="space-y-3 text-xs border-t border-slate-800/80 pt-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="font-semibold text-indigo-300">01. Observed Facts</div>
-                  <div className="text-slate-400">
-                    Exact file offsets, ELF/PE headers, decoded opcodes, AST nodes, and SHA-256 digests.
-                  </div>
-                </div>
-                <span className="font-mono text-slate-400 shrink-0 tabular-nums">offset / vaddr</span>
-              </div>
-
-              <div className="flex items-start justify-between gap-4 border-t border-slate-800/60 pt-2.5">
-                <div>
-                  <div className="font-semibold text-emerald-300">02. Derived Structure</div>
-                  <div className="text-slate-400">
-                    Control-flow graphs, cross-references (xrefs), binary patch diffs, and IPC edges.
-                  </div>
-                </div>
-                <span className="font-mono text-slate-400 shrink-0 tabular-nums">CFG / DIFF</span>
-              </div>
-
-              <div className="flex items-start justify-between gap-4 border-t border-slate-800/60 pt-2.5">
-                <div>
-                  <div className="font-semibold text-amber-300">03. Inferred Intent</div>
-                  <div className="text-slate-400">
-                    Reconstructed C/TypeScript/Solidity source implementations backed by ledger citations.
-                  </div>
-                </div>
-                <span className="font-mono text-slate-400 shrink-0 tabular-nums">Synthesis</span>
-              </div>
-
-              <div className="flex items-start justify-between gap-4 border-t border-slate-800/60 pt-2.5">
-                <div>
-                  <div className="font-semibold text-rose-300">04. Explicit Unknowns</div>
-                  <div className="text-slate-400">
-                    Fail-closed <code className="text-rose-200">NOT_ENOUGH_INFO</code> boundaries for unexamined external callers or runtime state.
-                  </div>
-                </div>
-                <span className="font-mono text-slate-400 shrink-0 tabular-nums">Fail-Closed</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Section 01: Interactive Reverse Engineering Workbench */}
-        <section id="workbench" className="space-y-6 scroll-mt-20">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-xs text-slate-400">
-                01. Interactive Binary, Bytecode, Bundle & Capture Inspector
-              </div>
-              <h2 className="text-2xl font-bold text-white font-display">
-                Reverse Psychology Analysis Workbench
-              </h2>
-            </div>
-
-            {/* Interactive Preset Switcher (Functional Buttons) */}
+            {/* Interactive Preset Switcher */}
             <div className="flex flex-wrap items-center gap-1.5 p-1 bg-[#111827] border border-slate-800 rounded-lg">
               {SAMPLE_ARTIFACT_PRESETS.map((preset) => {
                 const active = selectedPresetId === preset.id;
@@ -998,93 +666,73 @@ export default function ReversePsychologyApp() {
             <div className="bg-[#111827] border border-slate-800 rounded-xl p-12 text-center space-y-3">
               <RefreshCw className="w-6 h-6 text-indigo-400 animate-spin mx-auto" />
               <div className="text-sm text-slate-300">
-                Parsing binary headers, decoding instruction stream, and assembling Evidence Ledger...
+                Parsing headers, decoding instructions, and assembling Evidence Ledger...
               </div>
             </div>
           ) : (
-            <div className="space-y-6">
-              {/* Target Telemetry Strip (Unboxed clean metadata with typographic separators) */}
-              <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-800/80 pb-4">
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono tabular-nums">
-                      <span className="text-indigo-300 font-semibold">{report.targetName}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{report.format}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{report.architecture}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{report.sizeBytes} bytes</span>
-                      <span aria-hidden="true">·</span>
-                      <span>Entropy: {report.entropy} bits/byte</span>
-                      <span aria-hidden="true">·</span>
-                      <span>Entry: {report.entryPoint}</span>
-                    </div>
-                    <p className="text-sm text-slate-200">{report.summary}</p>
+            <div className="space-y-5">
+              {/* Target Telemetry Strip */}
+              <div className="bg-[#111827] border border-slate-800 rounded-xl px-5 py-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono tabular-nums">
+                    <span className="text-indigo-300 font-semibold">{report.targetName}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{report.format}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{report.architecture}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{report.sizeBytes} bytes</span>
+                    <span aria-hidden="true">·</span>
+                    <span>Entropy: {report.entropy} bits/byte</span>
+                    <span aria-hidden="true">·</span>
+                    <span>Entry: {report.entryPoint}</span>
                   </div>
-
-                  <div className="flex items-center gap-2.5 shrink-0">
-                    <a
-                      href="#visual-diff-studio"
-                      className="px-3.5 py-1.5 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                    >
-                      <GitCompare className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Compare v1 vs v2 Diff</span>
-                    </a>
-                    <button
-                      type="button"
-                      onClick={handleOpenPdfModal}
-                      className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      <span>Export PDF Report</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleDownloadJson(`${report.targetName}.rp-snapshot.json`, report)
-                      }
-                      className="px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Export Snapshot JSON</span>
-                    </button>
+                  <div className="text-xs text-slate-400 font-mono truncate tabular-nums">
+                    SHA-256: <span className="text-slate-300">{report.sha256}</span>
                   </div>
                 </div>
 
-                {/* Digest & Mitigations Row */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-xs">
-                  <div className="space-y-1">
-                    <div className="text-slate-400">SHA-256 Artifact Identity</div>
-                    <div className="font-mono text-slate-200 truncate tabular-nums" title={report.sha256}>
-                      {report.sha256}
-                    </div>
-                  </div>
-                  {report.mitigations.map((m, idx) => (
-                    <div key={idx} className="space-y-1">
-                      <div className="text-slate-400">{m.label}</div>
-                      <div className="text-slate-200 font-medium">
-                        {m.status}{' '}
-                        <span className="text-slate-400 font-normal">· {m.detail}</span>
-                      </div>
-                    </div>
-                  ))}
+                <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                  <a
+                    href="#visual-diff-studio"
+                    className="px-3.5 py-1.5 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <GitCompare className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Visual Diff</span>
+                  </a>
+                  <button
+                    type="button"
+                    onClick={handleOpenPdfModal}
+                    className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Export PDF Report</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleDownloadJson(`${report.targetName}.rp-snapshot.json`, report)
+                    }
+                    className="px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>JSON</span>
+                  </button>
                 </div>
               </div>
 
-              {/* Main 3-Column Workbench: Symbol Explorer Sidebar (3 cols) + Disassembly/Inspection (5 cols) + AI Interrogation & Reconstructed Source (4 cols) */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* 3-Column IDE Grid: Symbol Explorer (3 cols) + Disassembly/Inspector (5 cols) + AI Interrogation & Code (4 cols) */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
                 {/* Left 3 Columns: Searchable Symbol Explorer Sidebar */}
                 <aside
                   aria-label="Symbol Explorer Sidebar"
                   className="lg:col-span-3 bg-[#111827] border border-slate-800 rounded-xl overflow-hidden flex flex-col"
                 >
-                  {/* Sidebar Header */}
                   <div className="p-3.5 border-b border-slate-800 bg-[#0E1420] space-y-3">
                     <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-xs font-semibold text-white font-display">
+                      <h2 className="text-xs font-semibold text-white font-display">
                         Symbol &amp; Library Explorer
-                      </h3>
+                      </h2>
                       <span className="text-xs text-slate-400 font-mono tabular-nums">
                         {report.symbols.length} syms · {report.dynamicLibraries.length} libs
                       </span>
@@ -1267,7 +915,7 @@ export default function ReversePsychologyApp() {
                       </div>
                     )}
 
-                    {/* Group 3: Imported Dynamic Libraries & External Symbols */}
+                    {/* Group 3: Imported Dynamic Libraries */}
                     {(symbolCategoryFilter === 'all' || symbolCategoryFilter === 'import') && (
                       <div className="space-y-2 pt-4 first:pt-0">
                         <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono tabular-nums px-1">
@@ -1361,14 +1009,12 @@ export default function ReversePsychologyApp() {
 
                 {/* Center 5 Columns: Low-level Inspection Views */}
                 <div className="lg:col-span-5 bg-[#111827] border border-slate-800 rounded-xl overflow-hidden flex flex-col">
-                  {/* Segmented View Selector */}
                   <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-slate-800 bg-[#0E1420]">
                     <div className="flex flex-wrap items-center gap-1">
                       {(
                         [
-                          { id: 'disassembly', label: 'Disassembly & Trace' },
-                          { id: 'decompiler', label: 'Static Decompiler' },
-                          { id: 'diff', label: 'Quick Diff (v1 vs v2)' },
+                          { id: 'disassembly', label: 'Disassembly' },
+                          { id: 'decompiler', label: 'Decompiler' },
                           { id: 'sections', label: 'Sections & IPC' },
                           { id: 'hexdump', label: 'Hex Dump' },
                           { id: 'strings', label: `Strings (${report.strings.length})` },
@@ -1542,116 +1188,6 @@ export default function ReversePsychologyApp() {
                       </div>
                     )}
 
-                    {activeWorkbenchTab === 'diff' && diffReport && (
-                      <div className="space-y-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 border-b border-slate-800 pb-2.5">
-                          <div className="font-mono tabular-nums">
-                            <span>{diffReport.baseTargetName}</span>
-                            <span className="mx-1.5">vs</span>
-                            <span className="text-indigo-300">{diffReport.targetTargetName}</span>
-                            <span className="mx-1.5">·</span>
-                            <span className="text-amber-300">
-                              ~{diffReport.metrics.modifiedInsns} modified
-                            </span>
-                            <span className="mx-1.5">·</span>
-                            <span className="text-emerald-300">
-                              +{diffReport.metrics.addedInsns} added
-                            </span>
-                            <span className="mx-1.5">·</span>
-                            <span className="text-rose-300">
-                              -{diffReport.metrics.removedInsns} removed
-                            </span>
-                          </div>
-                          <a
-                            href="#visual-diff-studio"
-                            className="text-indigo-400 hover:text-indigo-300 font-medium underline underline-offset-4"
-                          >
-                            Open Full Split Studio &darr;
-                          </a>
-                        </div>
-
-                        <div className="space-y-1.5 font-mono text-xs tabular-nums">
-                          {diffReport.instructionRows.map((row) => {
-                            if (row.kind === 'unchanged') {
-                              const ins = row.baseInsn!;
-                              return (
-                                <div
-                                  key={row.id}
-                                  className="flex items-center justify-between gap-3 px-2.5 py-1 text-slate-400 rounded"
-                                >
-                                  <div className="flex items-center gap-3">
-                                    <span className="w-4 text-slate-600">=</span>
-                                    <span className="text-slate-500">{ins.address}</span>
-                                    <span className="text-slate-300 font-semibold">
-                                      {ins.mnemonic}
-                                    </span>
-                                    <span>{ins.operands}</span>
-                                  </div>
-                                  <span className="text-slate-600">{ins.bytesHex}</span>
-                                </div>
-                              );
-                            }
-                            if (row.kind === 'modified') {
-                              return (
-                                <div
-                                  key={row.id}
-                                  className="px-2.5 py-1.5 bg-amber-950/35 border border-amber-800/50 rounded space-y-1 text-amber-200"
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-bold text-amber-300">~ MOD</span>
-                                      <span className="line-through text-rose-300/80">
-                                        {row.baseInsn?.mnemonic} {row.baseInsn?.operands}
-                                      </span>
-                                      <span>&rarr;</span>
-                                      <span className="text-emerald-300 font-semibold">
-                                        {row.targetInsn?.mnemonic} {row.targetInsn?.operands}
-                                      </span>
-                                    </div>
-                                    <span className="text-[11px] text-amber-300/90 font-sans">
-                                      {row.deltaSummary}
-                                    </span>
-                                  </div>
-                                </div>
-                              );
-                            }
-                            if (row.kind === 'added') {
-                              const ins = row.targetInsn!;
-                              return (
-                                <div
-                                  key={row.id}
-                                  className="flex items-center justify-between gap-3 px-2.5 py-1.5 bg-emerald-950/35 border border-emerald-800/50 text-emerald-200 rounded"
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-bold text-emerald-300">+ ADD</span>
-                                    <span>{ins.address}</span>
-                                    <span className="font-semibold">{ins.mnemonic}</span>
-                                    <span>{ins.operands}</span>
-                                  </div>
-                                  <span className="text-emerald-300/80">{ins.bytesHex}</span>
-                                </div>
-                              );
-                            }
-                            const ins = row.baseInsn!;
-                            return (
-                              <div
-                                key={row.id}
-                                className="flex items-center justify-between gap-3 px-2.5 py-1.5 bg-rose-950/35 border border-rose-800/50 text-rose-200 rounded"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <span className="font-bold text-rose-300">- REM</span>
-                                  <span>{ins.address}</span>
-                                  <span className="font-semibold">{ins.mnemonic}</span>
-                                  <span>{ins.operands}</span>
-                                </div>
-                                <span className="text-rose-300/80">{ins.bytesHex}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-
                     {activeWorkbenchTab === 'sections' && (
                       <div className="space-y-6">
                         <div className="overflow-x-auto">
@@ -1696,7 +1232,7 @@ export default function ReversePsychologyApp() {
                         {report.jsAnalysis && (
                           <div className="space-y-3 border-t border-slate-800 pt-4">
                             <h3 className="text-xs font-semibold text-white">
-                              Recovered Electron Preload & IPC Channel Boundaries
+                              Recovered Electron Preload &amp; IPC Channel Boundaries
                             </h3>
                             <div className="space-y-2">
                               {report.jsAnalysis.modules.map((mod) => (
@@ -1786,18 +1322,16 @@ export default function ReversePsychologyApp() {
                 </div>
 
                 {/* Right 4 Columns: AI Intent Interrogation & Clean Reconstructed Code */}
-                <div className="lg:col-span-4 space-y-6">
+                <div className="lg:col-span-4 space-y-5">
                   {/* AI Interrogation Card */}
                   <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <div className="text-xs text-indigo-400 font-mono">
-                          Agent Investigation Loop
-                        </div>
-                        <h3 className="text-base font-semibold text-white font-display">
-                          Interrogate Target with Reverse Psychology
-                        </h3>
+                    <div className="space-y-0.5">
+                      <div className="text-xs text-indigo-400 font-mono">
+                        Evidence-Backed Investigation
                       </div>
+                      <h2 className="text-base font-semibold text-white font-display">
+                        Interrogate Target Intent
+                      </h2>
                     </div>
 
                     <div className="space-y-3">
@@ -1805,13 +1339,13 @@ export default function ReversePsychologyApp() {
                         rows={3}
                         value={analystQuestion}
                         onChange={(e) => setAnalystQuestion(e.target.value)}
-                        placeholder="Ask how a feature works, trace an IPC channel, or reconstruct C/TypeScript code..."
+                        placeholder="Ask how a feature works, trace an IPC channel, or reconstruct source code..."
                         className="w-full p-3 text-xs bg-[#0B0F17] border border-slate-800 rounded-lg text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 leading-relaxed"
                       />
 
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-xs text-slate-400">
-                          Grounds answers in extracted offsets & appends to Evidence Ledger
+                          Appends findings to Evidence Ledger
                         </span>
                         <button
                           type="button"
@@ -1843,7 +1377,7 @@ export default function ReversePsychologyApp() {
                     {aiSummary && (
                       <div className="p-3.5 bg-[#0B0F17] border border-slate-800 rounded-lg space-y-1.5">
                         <div className="text-xs font-semibold text-indigo-300">
-                          Investigation Findings Summary
+                          Investigation Findings
                         </div>
                         <p className="text-xs text-slate-300 leading-relaxed">{aiSummary}</p>
                       </div>
@@ -1877,7 +1411,7 @@ export default function ReversePsychologyApp() {
                       </button>
                     </div>
 
-                    <pre className="p-3.5 bg-[#0B0F17] border border-slate-800 rounded-lg text-xs font-mono text-slate-200 overflow-x-auto leading-relaxed max-h-[260px]">
+                    <pre className="p-3.5 bg-[#0B0F17] border border-slate-800 rounded-lg text-xs font-mono text-slate-200 overflow-x-auto leading-relaxed max-h-[280px]">
                       {report.reconstructedSource.code}
                     </pre>
 
@@ -1885,58 +1419,6 @@ export default function ReversePsychologyApp() {
                       {report.reconstructedSource.verificationNote}
                     </div>
                   </div>
-
-                  {/* Live Bit-Exact Sound-Pan Conformance Sandbox (when DX-Ball ELF is active) */}
-                  {selectedPresetId === 'dx-ball-elf' && (
-                    <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-3">
-                      <div className="text-xs font-semibold text-white">
-                        Interactive x86 Sound-Pan Conformance Verifier (3,205 Cases)
-                      </div>
-                      <div className="grid grid-cols-2 gap-4 text-xs">
-                        <label className="space-y-1">
-                          <span className="text-slate-400">
-                            Ball X Coordinate:{' '}
-                            <strong className="font-mono text-white tabular-nums">
-                              {ballX}px
-                            </strong>
-                          </span>
-                          <input
-                            type="range"
-                            min={-640}
-                            max={1280}
-                            value={ballX}
-                            onChange={(e) => setBallX(Number(e.target.value))}
-                            className="w-full accent-indigo-500"
-                          />
-                        </label>
-                        <label className="space-y-1">
-                          <span className="text-slate-400">
-                            Listener Center X:{' '}
-                            <strong className="font-mono text-white tabular-nums">
-                              {paddleX}px
-                            </strong>
-                          </span>
-                          <input
-                            type="range"
-                            min={0}
-                            max={640}
-                            value={paddleX}
-                            onChange={(e) => setPaddleX(Number(e.target.value))}
-                            className="w-full accent-indigo-500"
-                          />
-                        </label>
-                      </div>
-                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800 text-xs font-mono tabular-nums text-slate-300">
-                        <span>dx = {panCalcResult.delta}</span>
-                        <span>·</span>
-                        <span>(dx * 25) &gt;&gt; 4 = {panCalcResult.rawScaled}</span>
-                        <span>·</span>
-                        <span className="text-emerald-300 font-semibold">
-                          DirectSound Pan = {panCalcResult.clamped}
-                        </span>
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
             </div>
@@ -1946,15 +1428,15 @@ export default function ReversePsychologyApp() {
         {/* Section 02: Visual Binary, Decompiler & Control-Flow Diffing Studio */}
         <section
           id="visual-diff-studio"
-          className="space-y-6 scroll-mt-20 border-t border-slate-800/80 pt-12"
+          className="space-y-5 scroll-mt-16 border-t border-slate-800/80 pt-10"
         >
           <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
-            <div className="space-y-1">
+            <div className="space-y-0.5">
               <div className="text-xs text-slate-400">
-                02. Side-by-Side Opcode, Decompiler Pseudocode & Control-Flow Delta Engine
+                02. Opcode, Decompiler Pseudocode &amp; Control-Flow Delta Engine
               </div>
               <h2 className="text-2xl font-bold text-white font-display">
-                Visual Binary & Decompiler Diffing Studio
+                Visual Binary &amp; Decompiler Diffing Studio
               </h2>
             </div>
 
@@ -2008,16 +1490,16 @@ export default function ReversePsychologyApp() {
             <div className="p-3 bg-emerald-950/40 border border-emerald-800/70 rounded-lg text-xs text-emerald-200 flex items-center justify-between">
               <span>
                 Recorded binary and control-flow diff provenance into the{' '}
-                <strong>Epistemic Evidence Ledger</strong> (included in PDF & JSON exports).
+                <strong>Epistemic Evidence Ledger</strong>.
               </span>
               <Check className="w-4 h-4 text-emerald-400 shrink-0" />
             </div>
           )}
 
           {diffReport && report && comparisonReport && (
-            <div className="bg-[#111827] border border-slate-800 rounded-xl overflow-hidden space-y-0">
+            <div className="bg-[#111827] border border-slate-800 rounded-xl overflow-hidden">
               {/* Diff Summary & Controls Header Bar */}
-              <div className="p-5 border-b border-slate-800 space-y-4 bg-[#0E1420]">
+              <div className="p-4 border-b border-slate-800 space-y-3 bg-[#0E1420]">
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums">
@@ -2051,7 +1533,7 @@ export default function ReversePsychologyApp() {
                     </div>
 
                     {comparisonSource === 'paired-patch' && (
-                      <p className="text-xs text-slate-300 leading-relaxed">
+                      <p className="text-xs text-slate-400">
                         {activePresetMeta.patchDescription}
                       </p>
                     )}
@@ -2059,15 +1541,14 @@ export default function ReversePsychologyApp() {
 
                   {/* Sub-View + Layout Mode Segmented Controls */}
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    {/* 3 Comparison Sub-Views */}
                     <div className="flex items-center gap-1 p-1 bg-[#0B0F17] border border-slate-800 rounded-lg">
                       {(
                         [
-                          { id: 'instructions', label: 'Instruction & Opcode Diff' },
-                          { id: 'pseudocode', label: 'Decompiled Pseudocode Diff' },
+                          { id: 'instructions', label: 'Instruction Diff' },
+                          { id: 'pseudocode', label: 'Pseudocode Diff' },
                           {
                             id: 'control-flow',
-                            label: `Control-Flow & Branch Deltas (${diffReport.controlFlowDeltas.length})`,
+                            label: `CFG Deltas (${diffReport.controlFlowDeltas.length})`,
                           },
                         ] as { id: DiffSubView; label: string }[]
                       ).map((tab) => (
@@ -2086,7 +1567,6 @@ export default function ReversePsychologyApp() {
                       ))}
                     </div>
 
-                    {/* Side-by-Side Split vs Unified Inline Toggle */}
                     {diffSubView !== 'control-flow' && (
                       <div className="flex items-center gap-1 p-1 bg-[#0B0F17] border border-slate-800 rounded-lg">
                         <button
@@ -2111,12 +1591,11 @@ export default function ReversePsychologyApp() {
                           }`}
                         >
                           <AlignJustify className="w-3.5 h-3.5" />
-                          <span>Unified Inline</span>
+                          <span>Inline</span>
                         </button>
                       </div>
                     )}
 
-                    {/* Filter toggles */}
                     <button
                       type="button"
                       onClick={() => setShowChangesOnly((prev) => !prev)}
@@ -2126,7 +1605,7 @@ export default function ReversePsychologyApp() {
                           : 'bg-[#0B0F17] border-slate-800 text-slate-400 hover:text-slate-200'
                       }`}
                     >
-                      {showChangesOnly ? 'Showing Changes Only' : 'Show Changes Only'}
+                      {showChangesOnly ? 'Changes Only' : 'Show All'}
                     </button>
 
                     {diffLayoutMode === 'split' && diffSubView !== 'control-flow' && (
@@ -2153,16 +1632,17 @@ export default function ReversePsychologyApp() {
                     <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
                       {/* Left Pane: Baseline Version A */}
                       <div className="flex flex-col">
-                        <div className="px-4 py-2.5 bg-[#0B0F17] border-b border-slate-800 flex items-center justify-between text-xs font-mono text-slate-400 tabular-nums">
+                        <div className="px-4 py-2 bg-[#0B0F17] border-b border-slate-800 flex items-center justify-between text-xs font-mono text-slate-400 tabular-nums">
                           <span>
-                            Baseline (A): <strong className="text-slate-200">{report.targetName}</strong>
+                            Baseline (A):{' '}
+                            <strong className="text-slate-200">{report.targetName}</strong>
                           </span>
                           <span>SHA-256: {report.sha256.slice(0, 12)}...</span>
                         </div>
                         <div
                           ref={leftSplitRef}
                           onScroll={() => handleSplitScroll('left')}
-                          className="p-4 max-h-[480px] overflow-y-auto space-y-1 font-mono text-xs tabular-nums"
+                          className="p-4 max-h-[440px] overflow-y-auto space-y-1 font-mono text-xs tabular-nums"
                         >
                           {filteredDiffInstructions.map((row) => {
                             const ins = row.baseInsn;
@@ -2172,7 +1652,7 @@ export default function ReversePsychologyApp() {
                                   key={`left-${row.id}`}
                                   className="px-3 py-1.5 rounded bg-slate-900/40 text-slate-600 select-none"
                                 >
-                                  · · · (Instruction inserted in Comparison B)
+                                  · · · (Inserted in Comparison B)
                                 </div>
                               );
                             }
@@ -2214,7 +1694,7 @@ export default function ReversePsychologyApp() {
 
                       {/* Right Pane: Comparison Version B */}
                       <div className="flex flex-col">
-                        <div className="px-4 py-2.5 bg-[#0B0F17] border-b border-slate-800 flex items-center justify-between text-xs font-mono text-slate-400 tabular-nums">
+                        <div className="px-4 py-2 bg-[#0B0F17] border-b border-slate-800 flex items-center justify-between text-xs font-mono text-slate-400 tabular-nums">
                           <span>
                             Comparison (B):{' '}
                             <strong className="text-indigo-300">
@@ -2226,7 +1706,7 @@ export default function ReversePsychologyApp() {
                         <div
                           ref={rightSplitRef}
                           onScroll={() => handleSplitScroll('right')}
-                          className="p-4 max-h-[480px] overflow-y-auto space-y-1 font-mono text-xs tabular-nums"
+                          className="p-4 max-h-[440px] overflow-y-auto space-y-1 font-mono text-xs tabular-nums"
                         >
                           {filteredDiffInstructions.map((row) => {
                             const ins = row.targetInsn;
@@ -2236,7 +1716,7 @@ export default function ReversePsychologyApp() {
                                   key={`right-${row.id}`}
                                   className="px-3 py-1.5 rounded bg-slate-900/40 text-slate-600 select-none"
                                 >
-                                  · · · (Instruction removed from Baseline A)
+                                  · · · (Removed from Baseline A)
                                 </div>
                               );
                             }
@@ -2285,7 +1765,7 @@ export default function ReversePsychologyApp() {
                     </div>
                   ) : (
                     /* Unified Inline Instruction Diff View */
-                    <div className="p-4 max-h-[480px] overflow-y-auto space-y-1 font-mono text-xs tabular-nums">
+                    <div className="p-4 max-h-[440px] overflow-y-auto space-y-1 font-mono text-xs tabular-nums">
                       {filteredDiffInstructions.map((row) => {
                         if (row.kind === 'unchanged') {
                           const ins = row.baseInsn!;
@@ -2374,11 +1854,10 @@ export default function ReversePsychologyApp() {
                 <div>
                   {diffLayoutMode === 'split' ? (
                     <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
-                      {/* Left Pseudocode Pane */}
                       <div
                         ref={leftSplitRef}
                         onScroll={() => handleSplitScroll('left')}
-                        className="p-4 max-h-[480px] overflow-y-auto space-y-0.5 font-mono text-xs tabular-nums"
+                        className="p-4 max-h-[440px] overflow-y-auto space-y-0.5 font-mono text-xs tabular-nums"
                       >
                         {filteredDiffPseudocode.map((row) => (
                           <div
@@ -2412,11 +1891,10 @@ export default function ReversePsychologyApp() {
                         ))}
                       </div>
 
-                      {/* Right Pseudocode Pane */}
                       <div
                         ref={rightSplitRef}
                         onScroll={() => handleSplitScroll('right')}
-                        className="p-4 max-h-[480px] overflow-y-auto space-y-0.5 font-mono text-xs tabular-nums"
+                        className="p-4 max-h-[440px] overflow-y-auto space-y-0.5 font-mono text-xs tabular-nums"
                       >
                         {filteredDiffPseudocode.map((row) => (
                           <div
@@ -2451,8 +1929,7 @@ export default function ReversePsychologyApp() {
                       </div>
                     </div>
                   ) : (
-                    /* Unified Inline Pseudocode Diff View */
-                    <div className="p-4 max-h-[480px] overflow-y-auto space-y-0.5 font-mono text-xs tabular-nums">
+                    <div className="p-4 max-h-[440px] overflow-y-auto space-y-0.5 font-mono text-xs tabular-nums">
                       {filteredDiffPseudocode.map((row) => {
                         if (row.kind === 'modified') {
                           return (
@@ -2515,7 +1992,7 @@ export default function ReversePsychologyApp() {
 
               {/* SUB-VIEW 3: CONTROL-FLOW BLOCK & BRANCH DELTA SUMMARY */}
               {diffSubView === 'control-flow' && (
-                <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[500px] overflow-y-auto">
+                <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[460px] overflow-y-auto">
                   {filteredControlFlowDeltas.map((delta) => {
                     const isUnchanged = delta.changeType === 'unchanged';
                     const isAdded = delta.changeType === 'guard-block-added';
@@ -2578,9 +2055,12 @@ export default function ReversePsychologyApp() {
         </section>
 
         {/* Section 03: Epistemic Evidence Ledger */}
-        <section id="evidence-ledger" className="space-y-6 scroll-mt-20 border-t border-slate-800/80 pt-12">
+        <section
+          id="evidence-ledger"
+          className="space-y-5 scroll-mt-16 border-t border-slate-800/80 pt-10"
+        >
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            <div className="space-y-1">
+            <div className="space-y-0.5">
               <div className="text-xs text-slate-400">
                 03. Provenance-Backed Investigation Records
               </div>
@@ -2590,7 +2070,6 @@ export default function ReversePsychologyApp() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              {/* Interactive Category Filter Buttons */}
               <div className="flex flex-wrap items-center gap-1.5 p-1 bg-[#111827] border border-slate-800 rounded-lg">
                 {(
                   [
@@ -2616,7 +2095,6 @@ export default function ReversePsychologyApp() {
                 ))}
               </div>
 
-              {/* Primary Export PDF Report Action */}
               <button
                 type="button"
                 onClick={handleOpenPdfModal}
@@ -2673,436 +2151,6 @@ export default function ReversePsychologyApp() {
                 )}
               </div>
             ))}
-          </div>
-        </section>
-
-        {/* Section 04: RL Environment Builder & WHATWG Credential Redactor */}
-        <section id="rl-environments" className="space-y-6 scroll-mt-20 border-t border-slate-800/80 pt-12">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-xs text-slate-400">
-                04. Recorded Browser Captures to AgentEnv Training Suites
-              </div>
-              <h2 className="text-2xl font-bold text-white font-display">
-                RL Environment Builder & WHATWG Credential Redactor
-              </h2>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <input
-                type="text"
-                value={envNameInput}
-                onChange={(e) => setEnvNameInput(e.target.value)}
-                placeholder="Environment name..."
-                className="px-3 py-1.5 text-xs bg-[#111827] border border-slate-800 rounded-lg text-slate-200 font-mono w-40"
-              />
-              <button
-                type="button"
-                onClick={() =>
-                  handleDownloadJson(`${envNameInput}-manifest.json`, activeRlEnv)
-                }
-                className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Export AgentEnv Manifest</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-7 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
-                <div className="text-sm font-semibold text-white">
-                  Synthesized AgentEnv Tools ({activeRlEnv.tools.length} operations from{' '}
-                  {activeRlEnv.totalFlowsExamined} HAR flows)
-                </div>
-                <div className="text-xs font-mono text-slate-400">
-                  rp environment-build ./session.har ./{envNameInput} --name {envNameInput} --json
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                {activeRlEnv.tools.map((tool, i) => (
-                  <div
-                    key={i}
-                    className="p-3.5 bg-[#0B0F17] border border-slate-800 rounded-lg space-y-2 text-xs"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
-                      <div className="flex items-center gap-2">
-                        <span className="text-indigo-300 font-semibold">{tool.toolName}</span>
-                        <span className="text-slate-500">·</span>
-                        <span className="text-emerald-300">
-                          {tool.method} {tool.pathPattern}
-                        </span>
-                      </div>
-                      <span className="text-slate-400">
-                        HTTP {tool.responseStatus} · {tool.stateEffect}
-                      </span>
-                    </div>
-                    <p className="text-slate-300">{tool.description}</p>
-                    <div className="font-mono text-[11px] text-slate-400">
-                      Reward check: <code className="text-amber-300">{tool.rewardAssertion}</code>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="border-t border-slate-800 pt-4 space-y-3">
-                <div className="text-xs font-semibold text-white">
-                  Automatic Transport Credential Redactions ({activeRlEnv.redactions.length} removed)
-                </div>
-                <div className="space-y-1.5 font-mono text-xs">
-                  {activeRlEnv.redactions.map((red, idx) => (
-                    <div
-                      key={idx}
-                      className="flex flex-wrap items-center justify-between gap-2 py-1.5 px-3 bg-[#0B0F17] border border-slate-800/80 rounded"
-                    >
-                      <span className="text-rose-300">{red.pointer}</span>
-                      <span className="text-slate-400">
-                        {red.originalField} &rarr;{' '}
-                        <strong className="text-emerald-300">{red.redactedPreview}</strong>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="lg:col-span-5 space-y-6">
-              <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
-                <div className="space-y-1">
-                  <div className="text-xs text-indigo-400 font-mono">
-                    WHATWG URL Authority Boundary Verifier
-                  </div>
-                  <h3 className="text-sm font-semibold text-white font-display">
-                    Test Transport Credential Redaction Rules
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Matches <code className="text-slate-200">bridge/mitmproxy/capture.py</code>:
-                    strips userinfo before <code className="text-slate-200">@</code> in valid
-                    special-scheme authorities while preserving path <code className="text-slate-200">@</code>{' '}
-                    after <code className="text-slate-200">\</code> or in <code className="text-slate-200">file://</code> URLs.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <input
-                    type="text"
-                    value={testUrlInput}
-                    onChange={(e) => setTestUrlInput(e.target.value)}
-                    className="w-full px-3 py-2 text-xs font-mono bg-[#0B0F17] border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-indigo-500"
-                  />
-
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {[
-                      'https://user:pw@example.test\\path',
-                      'https://example.test\\part@tail',
-                      'file:///invoice@customer',
-                      'https://\\user:pass@host/path',
-                    ].map((sample, idx) => (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => setTestUrlInput(sample)}
-                        className="px-2 py-1 text-[11px] font-mono bg-slate-800/80 hover:bg-slate-700 text-slate-300 rounded cursor-pointer"
-                      >
-                        {sample}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="p-3 bg-[#0B0F17] border border-slate-800 rounded-lg font-mono text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400">Sanitized Output:</span>
-                    <span
-                      className={
-                        whatwgTestResult.redacted ? 'text-amber-300' : 'text-emerald-300'
-                      }
-                    >
-                      {whatwgTestResult.redacted
-                        ? 'Credentials Redacted'
-                        : 'Retained (No Authority Userinfo)'}
-                    </span>
-                  </div>
-                  <div className="text-white break-all">{whatwgTestResult.safeUrl}</div>
-                </div>
-              </div>
-
-              <div className="bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-white font-display">
-                    Generated AgentEnv Python Reward Harness
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleCopy('rl-reward-script', activeRlEnv.rewardCheckScript)
-                    }
-                    className="text-xs text-slate-300 hover:text-white flex items-center gap-1 cursor-pointer"
-                  >
-                    {copiedId === 'rl-reward-script' ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-400" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                    <span>Copy</span>
-                  </button>
-                </div>
-                <pre className="p-3.5 bg-[#0B0F17] border border-slate-800 rounded-lg text-xs font-mono text-slate-200 overflow-x-auto leading-relaxed max-h-[220px]">
-                  {activeRlEnv.rewardCheckScript}
-                </pre>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Section 05: Live MCP Server Console & Engine Bridges */}
-        <section id="mcp-bridges" className="space-y-6 scroll-mt-20 border-t border-slate-800/80 pt-12">
-          <div className="space-y-1">
-            <div className="text-xs text-slate-400">
-              05. Model Context Protocol Server & Headless Decompiler Bridges
-            </div>
-            <h2 className="text-2xl font-bold text-white font-display">
-              Live MCP JSON-RPC Sandbox & Engine Bridges
-            </h2>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-6 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                <div>
-                  <div className="text-xs text-indigo-400 font-mono">POST /api/mcp</div>
-                  <h3 className="text-base font-semibold text-white font-display">
-                    Streamable HTTP MCP Tool Invoker
-                  </h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleExecuteMcpTool}
-                  disabled={isCallingMcp}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Play className="w-3.5 h-3.5" />
-                  <span>{isCallingMcp ? 'Calling MCP...' : 'Invoke MCP Tool'}</span>
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <label className="space-y-1">
-                  <span className="text-slate-400">Select MCP Contract Tool</span>
-                  <select
-                    value={selectedMcpTool}
-                    onChange={(e) => {
-                      const next = e.target.value;
-                      setSelectedMcpTool(next);
-                      if (next === 'rp_inspect_binary') {
-                        setMcpArgsText(JSON.stringify({ presetId: 'dx-ball-elf' }, null, 2));
-                      } else if (next === 'rp_analyze_javascript_application') {
-                        setMcpArgsText(
-                          JSON.stringify({ presetId: 'notion-electron-ipc' }, null, 2)
-                        );
-                      } else if (next === 'rp_environment_build') {
-                        setMcpArgsText(JSON.stringify({ envName: 'my-env' }, null, 2));
-                      } else if (next === 'rp_redact_whatwg_url') {
-                        setMcpArgsText(
-                          JSON.stringify(
-                            { url: 'https://admin:pw123@example.test\\path@tail' },
-                            null,
-                            2
-                          )
-                        );
-                      }
-                    }}
-                    className="w-full px-3 py-2 bg-[#0B0F17] border border-slate-800 rounded-lg text-slate-100 font-mono"
-                  >
-                    <option value="rp_inspect_binary">rp_inspect_binary</option>
-                    <option value="rp_analyze_javascript_application">
-                      rp_analyze_javascript_application
-                    </option>
-                    <option value="rp_environment_build">rp_environment_build</option>
-                    <option value="rp_redact_whatwg_url">rp_redact_whatwg_url</option>
-                  </select>
-                </label>
-
-                <div className="space-y-1">
-                  <span className="text-slate-400">Schema Profile</span>
-                  <div className="px-3 py-2 bg-[#0B0F17] border border-slate-800 rounded-lg text-slate-300 font-mono">
-                    RP_MCP_INPUT_SCHEMA_PROFILE=compact
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <div className="text-xs text-slate-400">JSON-RPC Tool Arguments</div>
-                <textarea
-                  rows={4}
-                  value={mcpArgsText}
-                  onChange={(e) => setMcpArgsText(e.target.value)}
-                  className="w-full p-3 text-xs font-mono bg-[#0B0F17] border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              {mcpResponseText && (
-                <div className="space-y-1.5">
-                  <div className="text-xs text-slate-400">Live MCP Server Response</div>
-                  <pre className="p-3 bg-[#0B0F17] border border-slate-800 rounded-lg text-xs font-mono text-emerald-300 max-h-[220px] overflow-y-auto">
-                    {mcpResponseText}
-                  </pre>
-                </div>
-              )}
-            </div>
-
-            <div className="lg:col-span-6 bg-[#111827] border border-slate-800 rounded-xl p-5 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
-                <div>
-                  <div className="text-xs text-emerald-400 font-mono">
-                    Owned Process & Bridge Adapters
-                  </div>
-                  <h3 className="text-base font-semibold text-white font-display">
-                    Ghidra, JADX & mitmproxy Boundary Bridges
-                  </h3>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1">
-                  {BRIDGE_ADAPTER_SNIPPETS.map((b) => (
-                    <button
-                      key={b.id}
-                      type="button"
-                      onClick={() => setSelectedBridgeId(b.id)}
-                      className={`px-2.5 py-1 text-xs font-medium rounded transition-colors cursor-pointer ${
-                        selectedBridgeId === b.id
-                          ? 'bg-indigo-600 text-white'
-                          : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      {b.language}: {b.id.split('-')[0]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs font-mono text-slate-400">
-                  <span className="text-indigo-300">{activeBridge.file}</span>
-                  <button
-                    type="button"
-                    onClick={() => handleCopy(activeBridge.id, activeBridge.code)}
-                    className="text-slate-300 hover:text-white flex items-center gap-1 cursor-pointer"
-                  >
-                    {copiedId === activeBridge.id ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-400" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                    <span>Copy Bridge Source</span>
-                  </button>
-                </div>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  {activeBridge.summary}
-                </p>
-                <pre className="p-3.5 bg-[#0B0F17] border border-slate-800 rounded-lg text-xs font-mono text-slate-200 overflow-x-auto leading-relaxed max-h-[250px]">
-                  {activeBridge.code}
-                </pre>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Section 06: What You Can Analyze (Full Target Capability Matrix) */}
-        <section id="target-matrix" className="space-y-6 scroll-mt-20 border-t border-slate-800/80 pt-12">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-xs text-slate-400">
-                06. Supported Formats, Providers & CLI Workflows
-              </div>
-              <h2 className="text-2xl font-bold text-white font-display">
-                What You Can Analyze with Reverse Psychology
-              </h2>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-1 p-1 bg-[#111827] border border-slate-800 rounded-lg">
-                {[
-                  'All',
-                  'Native & Firmware',
-                  'Web, JS & Electron',
-                  'Managed & Mobile',
-                  'Network, Crash & Data',
-                ].map((dom) => (
-                  <button
-                    key={dom}
-                    type="button"
-                    onClick={() => setTargetDomainFilter(dom)}
-                    className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      targetDomainFilter === dom
-                        ? 'bg-indigo-600 text-white'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {dom}
-                  </button>
-                ))}
-              </div>
-
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={targetSearchQuery}
-                  onChange={(e) => setTargetSearchQuery(e.target.value)}
-                  placeholder="Search target or CLI..."
-                  className="pl-8 pr-3 py-1.5 text-xs bg-[#111827] border border-slate-800 rounded-lg text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 w-48"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-[#111827] border border-slate-800 rounded-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 bg-[#0E1420] text-slate-400">
-                    <th className="py-3 px-4 font-semibold">Target Artifact</th>
-                    <th className="py-3 px-4 font-semibold">Domain</th>
-                    <th className="py-3 px-4 font-semibold">What Reverse Psychology Returns</th>
-                    <th className="py-3 px-4 font-semibold">Provider & Host Requirements</th>
-                    <th className="py-3 px-4 font-semibold">CLI Command</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {filteredCapabilities.map((item, idx) => (
-                    <tr key={idx} className="hover:bg-slate-800/40 transition-colors">
-                      <td className="py-3 px-4 font-semibold text-white whitespace-nowrap">
-                        {item.target}
-                      </td>
-                      <td className="py-3 px-4 text-slate-400 whitespace-nowrap">
-                        {item.domain}
-                      </td>
-                      <td className="py-3 px-4 text-slate-300">{item.returns}</td>
-                      <td className="py-3 px-4 text-slate-400">{item.requirements}</td>
-                      <td className="py-3 px-4 font-mono text-indigo-300 whitespace-nowrap">
-                        <div className="flex items-center justify-between gap-2">
-                          <code>{item.cliCommand}</code>
-                          <button
-                            type="button"
-                            onClick={() => handleCopy(`cli-${idx}`, item.cliCommand)}
-                            className="text-slate-400 hover:text-white cursor-pointer"
-                            title="Copy CLI command"
-                          >
-                            {copiedId === `cli-${idx}` ? (
-                              <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           </div>
         </section>
       </main>
@@ -3173,7 +2221,7 @@ export default function ReversePsychologyApp() {
 
               <label className="block space-y-1">
                 <span className="text-slate-300 font-medium">
-                  Optional Analyst Scope & Assessment Notes
+                  Optional Analyst Scope &amp; Assessment Notes
                 </span>
                 <textarea
                   rows={2}
@@ -3195,7 +2243,7 @@ export default function ReversePsychologyApp() {
                     onChange={(e) => setPdfIncludeTargetHeader(e.target.checked)}
                     className="accent-indigo-600"
                   />
-                  <span className="text-slate-200">Target Metadata & SHA-256 Header</span>
+                  <span className="text-slate-200">Target Metadata &amp; SHA-256 Header</span>
                 </label>
 
                 <label className="flex items-center gap-2.5 p-2.5 bg-[#0B0F17] border border-slate-800 rounded-lg cursor-pointer">
@@ -3215,7 +2263,7 @@ export default function ReversePsychologyApp() {
                     onChange={(e) => setPdfIncludeReconstructedCode(e.target.checked)}
                     className="accent-indigo-600"
                   />
-                  <span className="text-slate-200">Reconstructed Source & Notes</span>
+                  <span className="text-slate-200">Reconstructed Source &amp; Notes</span>
                 </label>
 
                 {aiSummary && (
@@ -3307,13 +2355,12 @@ export default function ReversePsychologyApp() {
         </div>
       )}
 
-      {/* Clean Minimal Footer with Responsible-Use Notice */}
-      <footer className="border-t border-slate-800/80 py-8 px-6 mt-16 text-xs text-slate-400">
-        <div className="max-w-[1380px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      {/* Minimal Footer */}
+      <footer className="border-t border-slate-800/80 py-6 px-6 mt-12 text-xs text-slate-400">
+        <div className="max-w-[1400px] mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
-            <strong className="text-slate-200 font-display">Reverse Psychology</strong> · Built
-            for lawful security research, interoperability, software preservation, and auditing
-            software you own or are authorized to examine.
+            <strong className="text-slate-200 font-display">Reverse Psychology</strong> ·
+            Evidence-backed reverse engineering workbench.
           </div>
           <div className="flex items-center gap-4 shrink-0">
             <a href="#workbench" className="hover:text-white transition-colors">
@@ -3326,10 +2373,6 @@ export default function ReversePsychologyApp() {
             <span>·</span>
             <a href="#evidence-ledger" className="hover:text-white transition-colors">
               Evidence Ledger
-            </a>
-            <span>·</span>
-            <a href="#mcp-bridges" className="hover:text-white transition-colors">
-              MCP Server
             </a>
           </div>
         </div>
